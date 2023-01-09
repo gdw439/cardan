@@ -2,7 +2,7 @@
 #include <vector>
 #include <thread>
 #include <unistd.h>
-#include "QueueTrans.hpp"
+#include "Cardan.hpp"
 using namespace std;
 
 
@@ -23,12 +23,12 @@ int Process(vector<int> &xx, vector<int> &yy) {
 
 std::function<int(std::vector<int>&, std::vector<int>&)> func = 
         std::bind(&Process, std::placeholders::_1, std::placeholders::_2);
-QueueTrans<int, int> demo(12, func);
+Cardan<int, int> demo(12, func);
 
 
 void Request(int i) {
     vector<int> in = {i}, out;
-    demo.Producer(in, out);
+    demo.Request(in, out);
 }
 
 int main(void) {

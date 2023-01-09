@@ -10,14 +10,15 @@
 #include <queue>
 #include <atomic>
 
+using Tidx = int32_t; 
 #define CARDAN_QUEUE_FULL      12306
 
 // 定义queue队列格式
 template<class InType>
 struct ItemType {
-    int idx;
+    Tidx idx;
     InType inData;
-    ItemType(int x, InType y) : idx(x), inData(y) {}
+    ItemType(Tidx x, InType y) : idx(x), inData(y) {}
 };
 
 
@@ -28,6 +29,8 @@ struct DataType {
     int size;
     std::vector<InType> inData;
     std::vector<OutType> outData;
+    std::vector<InType> *inPtr;
+    std::vector<OutType> *outPtr;
 };
 
 
@@ -43,7 +46,9 @@ public:
     std::mutex workQueueMux_;
     std::queue<ItemType<ProcessIn>> workQueue_;                 // 存放待处理的结果
 
+    std::atomic<int> sum_;
     std::atomic<int> pos_;
+    std::vector<std::mutex> mutexList_;                         // 互斥锁
     std::vector<std::condition_variable> noticeList_;           // 存放每个线程的信号
     std::vector<DataType<ProcessIn, ProcessOut>> productList_;  // 存放处理后的结果
 
@@ -52,8 +57,9 @@ public:
     Cardan (
         int batchSize,
         std::function<int(std::vector<ProcessIn>&, std::vector<ProcessOut>&)> processFunc
-    ): batchSize_(batchSize), pos_(0), runEnable_(true), fullSize_(10240), processFunc_(processFunc) {
-        worker_.reset(new std::thread(&Cardan::Consumer, this));
+    ): batchSize_(batchSize), sum_(0), pos_(0), runEnable_(true), fullSize_(10240), processFunc_(processFunc) {
+        worker_.reset(new std::thread(&Cardan::Process, this));
+        mutexList_ = std::vector<std::mutex>(fullSize_);
         noticeList_ = std::vector<std::condition_variable>(fullSize_);
         productList_.resize(fullSize_);
     }
@@ -67,44 +73,60 @@ public:
         worker_->join();
     }
 
-    // 生产者，外部调用
-    int Producer(std::vector<ProcessIn> &dataIn, std::vector<ProcessOut> &dataOut) {
-        if (dataIn.size() == 0) return 0;
+    // 如果不希望修改dataIn，这里的&去掉即可
+    Tidx RequestAsync(std::vector<ProcessIn> &dataIn, std::vector<ProcessOut> &dataOut) {
+        int inSize = dataIn.size();
+        dataOut.clear();
+        dataOut.reserve(inSize);
+
         //& 将数据入队列
         std::unique_lock<std::mutex> queLock(workQueueMux_);
-        if (workQueue_.size() > fullSize_) { return CARDAN_QUEUE_FULL; }
+        if (workQueue_.size() >= fullSize_ || sum_ >= fullSize_) { return fullSize_; }
+        sum_++;
 
-        const int tid = pos_;
+        //? 可能是分配尚未释放的挂载
+        const Tidx tid = pos_;
         pos_ = (pos_ + 1) % fullSize_;
-        std::cout << __FILE__ << ":" << __LINE__ << " tid: " << tid << std::endl;
+        // std::cout << __FILE__ << ":" << __LINE__ << " tid: " << tid << std::endl;
 
-        for (auto &data : dataIn) {
+        for (auto data : dataIn) {
             ItemType<ProcessIn> item(tid, data);
             workQueue_.emplace(std::move(item));
         }
-        queLock.unlock();
 
+        dataIn.clear();
+        dataIn.reserve(inSize);
         //& 注册结果存放，获得信号
         productList_[tid].ret = 0;
-        productList_[tid].size = dataIn.size();
-        productList_[tid].inData.reserve(dataIn.size());
-        productList_[tid].outData.reserve(dataIn.size());
+        productList_[tid].size = inSize;
+        productList_[tid].inPtr = &dataIn;
+        productList_[tid].outPtr = &dataOut; 
+
+        queLock.unlock();
         notice_.notify_one();
+        return tid;
+    }
 
-        //& 等待处理完成，注销存放数据
-        std::mutex mut;
-        std::unique_lock<std::mutex> lock(mut);
-        noticeList_[tid].wait(lock);
+    int Wait(Tidx tid) {
+        if (tid >= fullSize_) return CARDAN_QUEUE_FULL;
 
-        swap(productList_[tid].inData, dataIn);
-        swap(productList_[tid].outData, dataOut);
+        std::unique_lock<std::mutex> lock(mutexList_[tid]);
+        noticeList_[tid].wait(lock, [=] { 
+            return productList_[tid].size == productList_[tid].inData.size() || productList_[tid].ret; 
+        });
+        swap(*(productList_[tid].inPtr), productList_[tid].inData);
+        swap(*(productList_[tid].outPtr), productList_[tid].outData);
+        sum_--;
 
         return productList_[tid].ret;
     }
 
+    int Request(std::vector<ProcessIn> &dataIn, std::vector<ProcessOut> &dataOut) {
+        return Wait(RequestAsync(dataIn, dataOut));
+    }
 
     // 消费者，资源非空时调用
-    void Consumer(void) {
+    void Process(void) {
         while (runEnable_) {
             std::vector<int> tidList;
             std::vector<ProcessIn> inList;
@@ -132,12 +154,16 @@ public:
 
             //& 输出结果写入结果列表中，写入返回值，如果该注册ID结束，发出信号通知生产者回收
             for (int i = 0; i < tidList.size(); ++i) {
-                int tid = tidList[i];
+                Tidx tid = tidList[i];
                 productList_[tid].ret = ret;
-                productList_[tid].inData.emplace_back(std::move(inList[i]));
-                productList_[tid].outData.emplace_back(std::move(outList[i]));
-                if (productList_[tid].size == productList_[tid].inData.size() || productList_[tid].ret) {
+                if (ret != 0) { 
                     noticeList_[tid].notify_one();
+                } else {
+                    productList_[tid].inData.emplace_back(std::move(inList[i]));
+                    productList_[tid].outData.emplace_back(std::move(outList[i]));
+                    if (productList_[tid].size == productList_[tid].inData.size()) {
+                        noticeList_[tid].notify_one();
+                    }
                 }
             }
         }
