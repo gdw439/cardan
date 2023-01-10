@@ -18,7 +18,7 @@ template<class InType>
 struct ItemType {
     Tidx idx;
     InType inData;
-    ItemType(Tidx x, InType y) : idx(x), inData(y) {}
+    ItemType(Tidx x, InType&& y) : idx(x), inData(y) {}
 };
 
 
@@ -27,8 +27,6 @@ template<class InType, class OutType>
 struct DataType {
     int ret;
     int size;
-    std::vector<InType> inData;
-    std::vector<OutType> outData;
     std::vector<InType> *inPtr;
     std::vector<OutType> *outPtr;
 };
@@ -73,7 +71,7 @@ public:
         worker_->join();
     }
 
-    // 如果不希望修改dataIn，这里的&去掉即可
+    // 这里的&不能去掉，不然的话，存在野指针风险
     Tidx RequestAsync(std::vector<ProcessIn> &dataIn, std::vector<ProcessOut> &dataOut) {
         int inSize = dataIn.size();
         dataOut.clear();
@@ -89,13 +87,12 @@ public:
         pos_ = (pos_ + 1) % fullSize_;
         // std::cout << __FILE__ << ":" << __LINE__ << " tid: " << tid << std::endl;
 
-        for (auto data : dataIn) {
-            ItemType<ProcessIn> item(tid, data);
+        for (auto &data : dataIn) {
+            ItemType<ProcessIn> item(tid, std::move(data));
             workQueue_.emplace(std::move(item));
         }
 
         dataIn.clear();
-        dataIn.reserve(inSize);
         //& 注册结果存放，获得信号
         productList_[tid].ret = 0;
         productList_[tid].size = inSize;
@@ -112,10 +109,8 @@ public:
 
         std::unique_lock<std::mutex> lock(mutexList_[tid]);
         noticeList_[tid].wait(lock, [=] { 
-            return productList_[tid].size == productList_[tid].inData.size() || productList_[tid].ret; 
+            return productList_[tid].size == productList_[tid].inPtr->size(); 
         });
-        swap(*(productList_[tid].inPtr), productList_[tid].inData);
-        swap(*(productList_[tid].outPtr), productList_[tid].outData);
         sum_--;
 
         return productList_[tid].ret;
@@ -155,15 +150,11 @@ public:
             //& 输出结果写入结果列表中，写入返回值，如果该注册ID结束，发出信号通知生产者回收
             for (int i = 0; i < tidList.size(); ++i) {
                 Tidx tid = tidList[i];
-                productList_[tid].ret = ret;
-                if (ret != 0) { 
+                productList_[tid].ret = productList_[tid].ret == 0 ? ret : productList_[tid].ret;
+                productList_[tid].inPtr->emplace_back(std::move(inList[i]));
+                if (!ret) productList_[tid].outPtr->emplace_back(std::move(outList[i]));
+                if (productList_[tid].size == productList_[tid].inPtr->size()) {
                     noticeList_[tid].notify_one();
-                } else {
-                    productList_[tid].inData.emplace_back(std::move(inList[i]));
-                    productList_[tid].outData.emplace_back(std::move(outList[i]));
-                    if (productList_[tid].size == productList_[tid].inData.size()) {
-                        noticeList_[tid].notify_one();
-                    }
                 }
             }
         }

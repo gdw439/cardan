@@ -12,9 +12,9 @@ int Process(vector<int> &xx, vector<int> &yy) {
     static int cnt = 0;
     yy.reserve(xx.size());
     for (auto & x : xx) {
-        if (x == 32) {
-            return -1;
-        }
+        // if (x == 32) {
+        //     return -1;
+        // }
         x = x + 1;
         yy.emplace_back(x + 1);
         usleep(1000);
@@ -28,7 +28,7 @@ int Process(vector<int> &xx, vector<int> &yy) {
 
 std::function<int(std::vector<int>&, std::vector<int>&)> func = 
         std::bind(&Process, std::placeholders::_1, std::placeholders::_2);
-Cardan<int, int> demo(16, func);
+Cardan<int, int> demo(32, func);
 
 
 void Request(int cnt) {
@@ -40,12 +40,12 @@ void Request(int cnt) {
     int ret = demo.Request(in, out);
 
     if (out.size() != cnt) {
-        cout << "bad lens" << endl;
+        cout << "bad lens: ---------------" << ret << endl;
         return ;
     }
 
     for (int i = 0; i < cnt; ++i) {
-        if (in[i] != i) {
+        if (in[i] != i + 1) {
             cout << "bad input: " << in[i] << "\t" << i + 1 << " Ret: " << ret << endl;
         }
 
